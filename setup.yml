@@ -1,0 +1,178 @@
+---
+- name: Configure ubu1 and ubu2
+  hosts: ubu1, ubu2
+  become: yes
+  tasks:
+    - name: Ensure unwanted services are stopped
+      block:
+        - name: Check if service exists
+          shell: systemctl status {{ item }}
+          register: service_check
+          failed_when: false
+          changed_when: false
+          loop:
+            - cups
+            - avahi-daemon
+            - xinetd
+          loop_control:
+            label: "{{ item }}"
+
+        - name: Stop unwanted services if they exist
+          service:
+            name: "{{ item }}"
+            state: stopped
+            enabled: no
+          when: "service_check.results is defined and service_check.results[loop.index0] is defined and service_check.results[loop.index0].rc == 0"
+          loop:
+            - cups
+            - avahi-daemon
+            - xinetd
+          loop_control:
+            label: "{{ item }}"
+
+    - name: Ensure unwanted packages are removed if installed
+      block:
+        - name: Gather facts for installed packages
+          ansible.builtin.package_facts:
+
+        - name: Remove packages if they are installed
+          ansible.builtin.package:
+            name: "{{ item }}"
+            state: absent
+          when: ansible_facts.packages[item] is defined
+          loop:
+            - cups
+            - avahi-daemon
+            - xinetd
+          loop_control:
+            label: "{{ item }}"
+
+    - name: Basic SSH hardening
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+      with_items:
+        - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin no' }
+        - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
+        - { regexp: '^#?PermitEmptyPasswords', line: 'PermitEmptyPasswords no' }
+      notify: Restart SSH
+
+  handlers:
+    - name: Restart SSH
+      service:
+        name: ssh
+        state: restarted
+
+- name: Setup LEMP stack on ubu1
+  hosts: ubu1
+  become: yes
+  tasks:
+    - name: Install Nginx, MySQL, PHP
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      loop:
+        - nginx
+        - mysql-server
+        - php-fpm
+        - php-mysql
+
+    - name: Ensure Nginx is started
+      service:
+        name: nginx
+        state: started
+        enabled: true
+
+- name: Setup ELK stack on ubu2
+  hosts: ubu2
+  become: yes
+  tasks:
+    - name: Add Elastic GPG key using apt-key adv
+      ansible.builtin.command: "apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys D27D666CD88E42B4"
+      register: add_gpg_key
+      failed_when: add_gpg_key.rc != 0
+
+    - name: Add Elastic repository if not already present
+      ansible.builtin.apt_repository:
+        repo: "deb https://artifacts.elastic.co/packages/7.x/apt stable main"
+        state: present
+        filename: 'elastic-7.x'
+      when: ansible_distribution == "Ubuntu"
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+      when: ansible_distribution == "Ubuntu"
+
+    - name: Install ElasticSearch, Logstash, Kibana
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      loop:
+        - elasticsearch
+        - logstash
+        - kibana
+
+    - name: Configure Elasticsearch and start service
+      service:
+        name: elasticsearch
+        state: started
+        enabled: true
+
+    - name: Configure Logstash and start service
+      service:
+        name: logstash
+        state: started
+        enabled: true
+
+    - name: Configure Kibana and start service
+      service:
+        name: kibana
+        state: started
+        enabled: true
+
+- name: Configure Nginx logs monitoring on ubu2
+  hosts: ubu1
+  become: yes
+  tasks:
+    - name: Add Elastic GPG key using apt-key adv
+      ansible.builtin.command: "apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys D27D666CD88E42B4"
+      register: add_gpg_key
+      failed_when: add_gpg_key.rc != 0
+
+    - name: Add Elastic repository for Filebeat
+      ansible.builtin.apt_repository:
+        repo: "deb https://artifacts.elastic.co/packages/7.x/apt stable main"
+        state: present
+        filename: 'elastic-7.x'
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+
+    - name: Install Filebeat to forward logs to ELK
+      ansible.builtin.apt:
+        name: filebeat
+        state: present
+
+    - name: Configure Filebeat to send logs to Logstash
+      copy:
+        content: |
+          output.logstash:
+            hosts: ["IP_UBU2:5044"]
+          filebeat.inputs:
+            - type: log
+              enabled: true
+              paths:
+                - /var/log/nginx/access.log
+        dest: /etc/filebeat/filebeat.yml
+
+    - name: Start Filebeat
+      service:
+        name: filebeat
+        state: started
+        enabled: true
