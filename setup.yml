@@ -94,12 +94,36 @@
           - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin no' }
           - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
           - { regexp: '^#?PermitEmptyPasswords', line: 'PermitEmptyPasswords no' }
+          - { regexp: '^#?MaxAuthTries', line: 'MaxAuthTries 3' }
+          - { regexp: '^#?LoginGraceTime', line: 'LoginGraceTime 10s' }
         notify: Restart SSH
-  
+
+      - name: Install fail2ban
+        apt:
+          name: fail2ban
+          state: present
+    
+      - name: Configure fail2ban
+        copy:
+          dest: /etc/fail2ban/jail.local
+          content: |
+            [sshd]
+            enabled = true
+            port = ssh
+            maxretry = 10
+            bantime = 30m
+            logpath = /var/log/ban_SHH_auth.log
+        notify: Restart fail2ban
+
     handlers:
       - name: Restart SSH
         service:
           name: ssh
+          state: restarted
+
+      - name: Restart fail2ban
+        service:
+          name: fail2ban
           state: restarted
   
   - name: Add Elastic GPG key and repository
@@ -211,7 +235,15 @@
         ansible.builtin.apt:
           name: filebeat
           state: present
-  
+
+      - name: Ensure Filebeat log directory exists
+        file:
+          path: /var/log/filebeat
+          state: directory
+          owner: root
+          group: root
+          mode: '0755'
+
       - name: Configure Filebeat to send logs to Logstash
         copy:
           dest: /etc/filebeat/filebeat.yml
